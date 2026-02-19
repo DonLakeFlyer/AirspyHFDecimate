@@ -39,3 +39,10 @@
 
 # debug information files
 *.dwo
+
+# Build directory
+build/
+
+# CMake generated files
+CMakeUserPresets.json
+install_manifest.txt
