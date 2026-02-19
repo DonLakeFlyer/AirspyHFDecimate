@@ -5,7 +5,7 @@ Utility that consumes raw complex IQ samples from `airspyhf_rx` via `stdin`, per
 ## Build
 
 ```
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build
 cmake --build build
 ```
 
