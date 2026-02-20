@@ -28,7 +28,7 @@ ctest --test-dir build --output-on-failure
 | Option | Default | Description |
 | --- | --- | --- |
 | `--input-rate <Hz>` | `768000` | Incoming complex sample rate from `airspyhf_rx`. |
-| `--shift-khz <kHz>` | `10` | Mix the IQ stream down by this amount before decimation (e.g., 10 kHz shifts a 146 MHz tone to 145.99 MHz). |
+| `--shift-khz <kHz>` | `10` | Shift the IQ stream by this amount before decimation: positive values shift up, negative values shift down. |
 | `--frame <samples>` | `1024` | Total complex samples per UDP packet (timestamp + payload). |
 | `--chunk <samples>` | `16384` | Number of complex samples pulled from `stdin` per iteration before decimation. |
 | `--ip <addr>` | `127.0.0.1` | Destination IPv4 address. |
@@ -56,7 +56,7 @@ The application keeps a running sample counter so that consecutive packets have 
 
 1. Read little-endian 16-bit signed IQ pairs from `stdin`.
 2. Normalize to `[-1, 1)` floats.
-3. Mix the complex stream left by `--shift-khz` (default 10 kHz) to dodge the HF DC spur.
+3. Shift the complex stream by `--shift-khz` (positive = up, negative = down; default 10 kHz) to dodge the HF DC spur.
 4. Run the samples through three cascaded FIR decimators (8×, 5×, 5×) with automatically designed Hamming-window filters.
 5. Buffer decimated samples until `frame - 1` IQs are available.
 6. Emit a timestamp+payload frame (total `frame` samples) to each configured UDP port.
