@@ -30,6 +30,26 @@ uint64_t extractTimeNs(const std::complex<float> &header) {
   return seconds * 1'000'000'000ULL + nanoseconds;
 }
 
+void decodeUavrtTimestamp(const std::complex<float> &header, uint32_t &seconds, uint32_t &nanoseconds) {
+  seconds = floatBitsToUint32(header.real());
+  nanoseconds = floatBitsToUint32(header.imag());
+}
+
+double estimateToneFrequencyHz(const std::vector<std::complex<float>> &samples, double sampleRateHz) {
+  if (samples.size() < 2 || sampleRateHz <= 0.0) {
+    return 0.0;
+  }
+
+  std::complex<double> sum{0.0, 0.0};
+  for (std::size_t index = 1; index < samples.size(); ++index) {
+    sum += static_cast<std::complex<double>>(samples[index]) *
+           std::conj(static_cast<std::complex<double>>(samples[index - 1]));
+  }
+
+  const double avgPhaseStep = std::atan2(sum.imag(), sum.real());
+  return (avgPhaseStep * sampleRateHz) / kTwoPi;
+}
+
 void testParseArgsDefaults() {
   char arg0[] = "airspyhf_decimator";
   char *argv[] = {arg0};
@@ -103,8 +123,10 @@ void testDesignLowpassNormalization() {
 
 void testConvertToComplexLittleEndian() {
   const std::vector<uint8_t> bytes = {
-      0x00, 0x80, 0x00, 0x00,
-      0xff, 0x7f, 0x00, 0x80,
+      0x00, 0x00, 0x80, 0xbf,
+      0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x3f,
+      0x00, 0x00, 0x80, 0xbf,
   };
 
   const auto samples = convertToComplex(bytes);
@@ -113,7 +135,7 @@ void testConvertToComplexLittleEndian() {
   }
 
   if (!approxEqual(samples[0].real(), -1.0f) || !approxEqual(samples[0].imag(), 0.0f) ||
-      !approxEqual(samples[1].real(), 32767.0f / 32768.0f) || !approxEqual(samples[1].imag(), -1.0f)) {
+      !approxEqual(samples[1].real(), 0.5f) || !approxEqual(samples[1].imag(), -1.0f)) {
     throw std::runtime_error("convertToComplex scaling mismatch");
   }
 }
@@ -130,6 +152,39 @@ void testFrequencyShifterZeroShiftNoop() {
 
   if (samples != original) {
     throw std::runtime_error("FrequencyShifter with 0 Hz should not modify samples");
+  }
+}
+
+void testFrequencyShifterSignConvention() {
+  constexpr double sampleRateHz = 96000.0;
+  constexpr double inputToneHz = 5000.0;
+  constexpr double shiftHz = 2000.0;
+  constexpr std::size_t sampleCount = 4096;
+
+  std::vector<std::complex<float>> base(sampleCount);
+  const double inputPhaseStep = kTwoPi * inputToneHz / sampleRateHz;
+  for (std::size_t index = 0; index < sampleCount; ++index) {
+    const double phase = inputPhaseStep * static_cast<double>(index);
+    base[index] = {static_cast<float>(std::cos(phase)), static_cast<float>(std::sin(phase))};
+  }
+
+  auto shiftedUp = base;
+  FrequencyShifter shifterUp(sampleRateHz, shiftHz);
+  shifterUp.mix(shiftedUp);
+
+  auto shiftedDown = base;
+  FrequencyShifter shifterDown(sampleRateHz, -shiftHz);
+  shifterDown.mix(shiftedDown);
+
+  const double upHz = estimateToneFrequencyHz(shiftedUp, sampleRateHz);
+  const double downHz = estimateToneFrequencyHz(shiftedDown, sampleRateHz);
+
+  if (std::abs(upHz - (inputToneHz + shiftHz)) > 60.0) {
+    throw std::runtime_error("Positive shift should move tone up in frequency");
+  }
+
+  if (std::abs(downHz - (inputToneHz - shiftHz)) > 60.0) {
+    throw std::runtime_error("Negative shift should move tone down in frequency");
   }
 }
 
@@ -158,12 +213,60 @@ void testTimestampEncoderMonotonicStep() {
   }
 }
 
+void testTimestampMatchesUavrtDetectionFormat() {
+  constexpr double sampleRateHz = 3840.0;
+  TimestampEncoder encoder(sampleRateHz);
+
+  const auto header0 = encoder.headerForSample(0);
+  const auto header1 = encoder.headerForSample(1);
+  const auto headerMany = encoder.headerForSample(12345);
+
+  uint32_t sec0 = 0;
+  uint32_t nsec0 = 0;
+  uint32_t sec1 = 0;
+  uint32_t nsec1 = 0;
+  uint32_t secMany = 0;
+  uint32_t nsecMany = 0;
+
+  decodeUavrtTimestamp(header0, sec0, nsec0);
+  decodeUavrtTimestamp(header1, sec1, nsec1);
+  decodeUavrtTimestamp(headerMany, secMany, nsecMany);
+
+  if (nsec0 >= 1'000'000'000U || nsec1 >= 1'000'000'000U || nsecMany >= 1'000'000'000U) {
+    throw std::runtime_error("uavrt timestamp nanoseconds must be < 1e9");
+  }
+
+  const uint64_t t0 = static_cast<uint64_t>(sec0) * 1'000'000'000ULL + static_cast<uint64_t>(nsec0);
+  const uint64_t t1 = static_cast<uint64_t>(sec1) * 1'000'000'000ULL + static_cast<uint64_t>(nsec1);
+  const uint64_t tm = static_cast<uint64_t>(secMany) * 1'000'000'000ULL + static_cast<uint64_t>(nsecMany);
+
+  const uint64_t stepOneNs = static_cast<uint64_t>(std::llround(1'000'000'000.0 / sampleRateHz));
+  const uint64_t expectedManyNs = static_cast<uint64_t>(std::llround(12345.0 * 1'000'000'000.0 / sampleRateHz));
+
+  if (t1 <= t0 || tm <= t1) {
+    throw std::runtime_error("uavrt timestamp fields must be monotonic in sample index");
+  }
+
+  const uint64_t observedStepOne = t1 - t0;
+  const uint64_t observedMany = tm - t0;
+  constexpr uint64_t oneSampleToleranceNs = 2'000ULL;
+  constexpr uint64_t manySampleToleranceNs = 10'000ULL;
+
+  if (observedStepOne + oneSampleToleranceNs < stepOneNs || observedStepOne > stepOneNs + oneSampleToleranceNs) {
+    throw std::runtime_error("uavrt timestamp decode mismatch for one-sample increment");
+  }
+
+  if (observedMany + manySampleToleranceNs < expectedManyNs || observedMany > expectedManyNs + manySampleToleranceNs) {
+    throw std::runtime_error("uavrt timestamp decode mismatch for multi-sample increment");
+  }
+}
+
 void testPulseSurvivesShiftAndDecimation() {
   constexpr double inputRateHz = 768000.0;
   constexpr double rfCenterHz = 145990000.0;
   constexpr double pulseRfHz = 146000000.0;
   constexpr double toneOffsetHz = pulseRfHz - rfCenterHz;
-  constexpr double shiftHz = 10000.0;
+  constexpr double shiftHz = -10000.0;
   constexpr double durationSeconds = 2.5;
   constexpr double pulseWidthSeconds = 0.015;
   constexpr double pulseIntervalSeconds = 2.0;
@@ -284,7 +387,7 @@ void testNoisyPulseSurvivesShiftAndDecimation() {
   constexpr double rfCenterHz = 145990000.0;
   constexpr double pulseRfHz = 146000000.0;
   constexpr double toneOffsetHz = pulseRfHz - rfCenterHz;
-  constexpr double shiftHz = 10000.0;
+  constexpr double shiftHz = -10000.0;
   constexpr double durationSeconds = 2.5;
   constexpr double pulseWidthSeconds = 0.015;
   constexpr double pulseIntervalSeconds = 2.0;
@@ -401,10 +504,12 @@ int main() {
       {"designLowpass normalization", testDesignLowpassNormalization},
       {"convertToComplex little-endian", testConvertToComplexLittleEndian},
       {"FrequencyShifter zero-shift", testFrequencyShifterZeroShiftNoop},
+      {"FrequencyShifter sign convention", testFrequencyShifterSignConvention},
       {"FirDecimator output count", testFirDecimatorOutputCount},
       {"TimestampEncoder monotonic step", testTimestampEncoderMonotonicStep},
-        {"Pulse survives shift and decimation", testPulseSurvivesShiftAndDecimation},
-        {"Noisy pulse survives shift and decimation", testNoisyPulseSurvivesShiftAndDecimation},
+        {"Timestamp matches uavrt_detection format", testTimestampMatchesUavrtDetectionFormat},
+      {"Pulse survives shift and decimation", testPulseSurvivesShiftAndDecimation},
+      {"Noisy pulse survives shift and decimation", testNoisyPulseSurvivesShiftAndDecimation},
   };
 
   int failures = 0;

@@ -18,11 +18,12 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+#include <chrono>
 
 namespace {
 
 constexpr double kTotalDecimation = 8.0 * 5.0 * 5.0;
-constexpr std::size_t kBytesPerIQ = 4; // 2 * int16
+constexpr std::size_t kBytesPerIQ = 8; // 2 * float32
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kTwoPi = 6.28318530717958647692;
 
@@ -42,7 +43,7 @@ struct ArgsError : public std::runtime_error {
 void printUsage(const char *argv0) {
   std::cerr << "Usage: " << argv0 << " [options]\n"
             << "  --input-rate <Hz>     Incoming IQ sample rate (default 768000)\n"
-            << "  --shift-khz <kHz>     Mix signal down by this amount before decimation (default 10)\n"
+            << "  --shift-khz <kHz>     Frequency shift before decimation: positive shifts up, negative shifts down (default 10)\n"
             << "  --frame <samples>     Total complex samples per UDP packet, including the timestamp (default 1024)\n"
             << "  --chunk <samples>     Complex samples pulled per stdin read (default 16384)\n"
             << "  --ip <addr>           Destination IPv4 address (default 127.0.0.1)\n"
@@ -195,7 +196,7 @@ class FrequencyShifter {
     if (sampleRate <= 0.0) {
       sampleRate = 1.0;
     }
-    step_ = (shiftHz_ == 0.0) ? 0.0 : (-kTwoPi * shiftHz_ / sampleRate);
+    step_ = (shiftHz_ == 0.0) ? 0.0 : (kTwoPi * shiftHz_ / sampleRate);
   }
 
   void mix(std::vector<std::complex<float>> &samples) {
@@ -223,7 +224,14 @@ class FrequencyShifter {
 
 class TimestampEncoder {
  public:
-  explicit TimestampEncoder(double sampleRate) : sampleRate_(sampleRate) {}
+  explicit TimestampEncoder(double sampleRate) : sampleRate_(sampleRate) {
+    if (sampleRate_ > 0.0) {
+      const double rounded = std::round(sampleRate_);
+      if (std::abs(sampleRate_ - rounded) < 1e-6) {
+        sampleRateHz_ = static_cast<uint64_t>(rounded);
+      }
+    }
+  }
 
   void reset() { anchored_ = false; }
 
@@ -231,14 +239,27 @@ class TimestampEncoder {
     if (!anchored_) {
       anchorToWallClock();
     }
-    double absolute = baseSeconds_ + static_cast<double>(sampleIndex) / sampleRate_;
-    auto seconds = static_cast<uint32_t>(absolute);
-    double fractional = absolute - static_cast<double>(seconds);
-    auto nanoseconds = static_cast<uint32_t>(std::round(fractional * 1'000'000'000.0));
-    if (nanoseconds >= 1'000'000'000U) {
-      nanoseconds -= 1'000'000'000U;
-      ++seconds;
+    uint32_t seconds = 0;
+    uint32_t nanoseconds = 0;
+
+    if (sampleRateHz_ > 0) {
+      const unsigned __int128 nsNumerator = static_cast<unsigned __int128>(sampleIndex) * 1000000000ULL;
+      const uint64_t nsOffset = static_cast<uint64_t>(nsNumerator / sampleRateHz_);
+      const uint64_t nsecTotal = static_cast<uint64_t>(baseNsec_) + nsOffset;
+
+      seconds = baseSec_ + static_cast<uint32_t>(nsecTotal / 1000000000ULL);
+      nanoseconds = static_cast<uint32_t>(nsecTotal % 1000000000ULL);
+    } else {
+      double absolute = baseSeconds_ + static_cast<double>(sampleIndex) / sampleRate_;
+      seconds = static_cast<uint32_t>(absolute);
+      double fractional = absolute - static_cast<double>(seconds);
+      nanoseconds = static_cast<uint32_t>(std::round(fractional * 1'000'000'000.0));
+      if (nanoseconds >= 1'000'000'000U) {
+        nanoseconds -= 1'000'000'000U;
+        ++seconds;
+      }
     }
+
     float secBits = 0.0f;
     float nsecBits = 0.0f;
     std::memcpy(&secBits, &seconds, sizeof(uint32_t));
@@ -250,11 +271,16 @@ class TimestampEncoder {
   void anchorToWallClock() {
     timespec ts {};
     clock_gettime(CLOCK_REALTIME, &ts);
+    baseSec_ = static_cast<uint32_t>(ts.tv_sec);
+    baseNsec_ = static_cast<uint32_t>(ts.tv_nsec);
     baseSeconds_ = static_cast<double>(ts.tv_sec) + static_cast<double>(ts.tv_nsec) * 1e-9;
     anchored_ = true;
   }
 
   double sampleRate_;
+  uint64_t sampleRateHz_ = 0;
+  uint32_t baseSec_ = 0;
+  uint32_t baseNsec_ = 0;
   double baseSeconds_ = 0.0;
   bool anchored_ = false;
 };
@@ -295,11 +321,22 @@ class UdpStreamer {
   void send(const std::vector<std::complex<float>> &frame) const {
     const auto *raw = reinterpret_cast<const char *>(frame.data());
     const std::size_t bytes = frame.size() * sizeof(std::complex<float>);
+    ++packetsSent_;
+    if (packetsSent_ == 1 || (packetsSent_ % 500) == 0) {
+      std::cerr << "airspyhf_decimator: sent packets=" << packetsSent_ << " send_errors=" << sendErrors_ << "\n";
+    }
     for (const auto &socket : sockets_) {
-      ssize_t sent = ::sendto(socket.fd, raw, bytes, MSG_DONTWAIT,
+      ssize_t sent = ::sendto(socket.fd, raw, bytes, 0,
                               reinterpret_cast<const sockaddr *>(&socket.addr), sizeof(sockaddr_in));
       if (sent < 0) {
+        ++sendErrors_;
         std::perror("sendto");
+        if (sendErrors_ == 1 || (sendErrors_ % 100) == 0) {
+          std::cerr << "UDP send failures: " << sendErrors_ << " of " << packetsSent_ << " packets\n";
+        }
+      } else if (static_cast<std::size_t>(sent) != bytes) {
+        ++sendErrors_;
+        std::cerr << "Partial UDP send: sent " << sent << " bytes, expected " << bytes << "\n";
       }
     }
   }
@@ -311,6 +348,8 @@ class UdpStreamer {
   };
 
   std::vector<SocketSlot> sockets_;
+  mutable uint64_t packetsSent_ = 0;
+  mutable uint64_t sendErrors_ = 0;
 };
 
 std::vector<std::complex<float>> convertToComplex(const std::vector<uint8_t> &bytes) {
@@ -319,13 +358,12 @@ std::vector<std::complex<float>> convertToComplex(const std::vector<uint8_t> &by
   }
   std::vector<std::complex<float>> result;
   result.reserve(bytes.size() / kBytesPerIQ);
-  constexpr float scale = 1.0f / 32768.0f;
   for (std::size_t offset = 0; offset + kBytesPerIQ <= bytes.size(); offset += kBytesPerIQ) {
-    int16_t i = static_cast<int16_t>(static_cast<uint16_t>(bytes[offset]) |
-                                     (static_cast<uint16_t>(bytes[offset + 1]) << 8));
-    int16_t q = static_cast<int16_t>(static_cast<uint16_t>(bytes[offset + 2]) |
-                                     (static_cast<uint16_t>(bytes[offset + 3]) << 8));
-    result.emplace_back(static_cast<float>(i) * scale, static_cast<float>(q) * scale);
+    float i = 0.0f;
+    float q = 0.0f;
+    std::memcpy(&i, bytes.data() + offset, sizeof(float));
+    std::memcpy(&q, bytes.data() + offset + sizeof(float), sizeof(float));
+    result.emplace_back(i, q);
   }
   return result;
 }
@@ -337,6 +375,11 @@ int main(int argc, char **argv) {
     std::signal(SIGPIPE, SIG_IGN);
     auto opts = parseArgs(argc, argv);
     const double outputRate = opts.inputRate / kTotalDecimation;
+
+    std::cerr << "airspyhf_decimator: inputRate=" << opts.inputRate
+          << " shiftKhz=" << opts.shiftKhz
+          << " frame=" << opts.packetSamples
+          << " outputRate=" << outputRate << "\n";
 
     FirDecimator stage1(8, 8 * 16, 0.45f / 8.0f);
     FirDecimator stage2(5, 5 * 16, 0.45f / 5.0f);
@@ -355,7 +398,15 @@ int main(int argc, char **argv) {
     buffer.reserve(payloadSamples * 2);
 
     uint64_t samplesSent = 0;
+    uint64_t inputSamplesProcessed = 0;
+    uint64_t outputSamplesProduced = 0;
+    uint64_t framesSent = 0;
+    uint64_t stdinBytesRead = 0;
     const std::size_t chunkBytes = opts.chunkSamples * kBytesPerIQ;
+
+    auto runStart = std::chrono::steady_clock::now();
+    auto lastPerfLog = runStart;
+    std::chrono::steady_clock::duration processingTime{};
 
     while (std::cin.good()) {
       std::vector<uint8_t> chunk(chunkBytes);
@@ -364,6 +415,7 @@ int main(int argc, char **argv) {
       if (bytesRead <= 0) {
         break;
       }
+      stdinBytesRead += static_cast<uint64_t>(bytesRead);
       chunk.resize(static_cast<std::size_t>(bytesRead));
 
       std::vector<uint8_t> all;
@@ -379,10 +431,15 @@ int main(int argc, char **argv) {
       }
 
       auto stageInput = convertToComplex(toConvert);
+      inputSamplesProcessed += stageInput.size();
+
+      auto processStart = std::chrono::steady_clock::now();
       frequencyShifter.mix(stageInput);
       auto afterStage1 = stage1.process(stageInput);
       auto afterStage2 = stage2.process(afterStage1);
       auto decimated = stage3.process(afterStage2);
+      processingTime += (std::chrono::steady_clock::now() - processStart);
+      outputSamplesProduced += decimated.size();
 
       if (!decimated.empty()) {
         buffer.insert(buffer.end(), decimated.begin(), decimated.end());
@@ -394,8 +451,31 @@ int main(int argc, char **argv) {
         frame.push_back(timestampEncoder.headerForSample(samplesSent));
         frame.insert(frame.end(), buffer.begin(), buffer.begin() + payloadSamples);
         streamer.send(frame);
+        ++framesSent;
         buffer.erase(buffer.begin(), buffer.begin() + payloadSamples);
         samplesSent += payloadSamples;
+      }
+
+      auto now = std::chrono::steady_clock::now();
+      if (now - lastPerfLog >= std::chrono::seconds(1)) {
+        const double elapsedSec = std::chrono::duration<double>(now - runStart).count();
+        const double processingSec = std::chrono::duration<double>(processingTime).count();
+        const double inputRate = (elapsedSec > 0.0) ? (static_cast<double>(inputSamplesProcessed) / elapsedSec) : 0.0;
+        const double outputRateMeasured = (elapsedSec > 0.0) ? (static_cast<double>(outputSamplesProduced) / elapsedSec) : 0.0;
+        const double stdinBytesPerSec = (elapsedSec > 0.0) ? (static_cast<double>(stdinBytesRead) / elapsedSec) : 0.0;
+        const double stdinComplexPerSec = stdinBytesPerSec / static_cast<double>(kBytesPerIQ);
+        const double frameRate = (elapsedSec > 0.0) ? (static_cast<double>(framesSent) / elapsedSec) : 0.0;
+        const double processingDuty = (elapsedSec > 0.0) ? (100.0 * processingSec / elapsedSec) : 0.0;
+
+        std::cerr << "airspyhf_decimator: perf stdin_Bps=" << stdinBytesPerSec
+            << " stdin_complex_sps=" << stdinComplexPerSec
+            << " in_sps=" << inputRate
+                  << " out_sps=" << outputRateMeasured
+                  << " frames_per_s=" << frameRate
+                  << " cpu_duty_pct=" << processingDuty
+                  << " buffer_samples=" << buffer.size()
+                  << "\n";
+        lastPerfLog = now;
       }
     }
   } catch (const ArgsError &err) {
