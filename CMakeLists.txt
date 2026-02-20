@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
 project(AirspyHFDecimate LANGUAGES CXX)
 
+include(CTest)
+
 if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
@@ -19,3 +21,18 @@ target_compile_options(airspyhf_decimator PRIVATE
     -Wpedantic
     -Werror=return-type
 )
+
+if(BUILD_TESTING)
+    add_executable(airspyhf_decimator_tests
+        tests/test_main.cpp
+    )
+
+    target_compile_options(airspyhf_decimator_tests PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+        -Werror=return-type
+    )
+
+    add_test(NAME airspyhf_decimator_tests COMMAND airspyhf_decimator_tests)
+endif()

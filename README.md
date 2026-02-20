@@ -1,5 +1,7 @@
 # AirspyHFDecimate
 
+[![CI](https://github.com/DonLakeFlyer/AirspyHFDecimate/actions/workflows/ci.yml/badge.svg)](https://github.com/DonLakeFlyer/AirspyHFDecimate/actions/workflows/ci.yml)
+
 Utility that consumes raw complex IQ samples from `airspyhf_rx` via `stdin`, performs a three-stage FIR decimation (factors 8, 5, 5) using Hamming-windowed low-pass filters, and republishes the reduced-rate stream over UDP in the format required by the `uavrt_detection` pipeline.
 
 ## Build
@@ -7,6 +9,14 @@ Utility that consumes raw complex IQ samples from `airspyhf_rx` via `stdin`, per
 ```
 cmake -S . -B build
 cmake --build build
+```
+
+## Test
+
+```
+cmake -S . -B build
+cmake --build build
+ctest --test-dir build --output-on-failure
 ```
 
 ## Usage
