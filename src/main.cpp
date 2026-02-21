@@ -455,8 +455,10 @@ bool parseZmqFrame(const std::vector<uint8_t> &frame, ZmqPacket &packet) {
 
 class ZmqIqReceiver {
   public:
-        ZmqIqReceiver(const ZmqIqReceiver&) = delete;
-        ZmqIqReceiver& operator=(const ZmqIqReceiver&) = delete;
+        ZmqIqReceiver(const ZmqIqReceiver &) = delete;
+        ZmqIqReceiver &operator=(const ZmqIqReceiver &) = delete;
+        ZmqIqReceiver(ZmqIqReceiver &&) = delete;
+        ZmqIqReceiver &operator=(ZmqIqReceiver &&) = delete;
 
     explicit ZmqIqReceiver(const std::string &endpoint)
         : context_(zmq_ctx_new()) {
@@ -476,8 +478,8 @@ class ZmqIqReceiver {
             throw std::runtime_error("Failed to set ZeroMQ receive timeout");
         }
 
-        const int subscribeAll = 0;
-        if (zmq_setsockopt(socket_, ZMQ_SUBSCRIBE, &subscribeAll, 0) != 0) {
+        const char *allTopicsFilter = "";
+        if (zmq_setsockopt(socket_, ZMQ_SUBSCRIBE, allTopicsFilter, 0) != 0) {
             cleanup();
             throw std::runtime_error("Failed to subscribe ZeroMQ socket");
         }
