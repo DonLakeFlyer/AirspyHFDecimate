@@ -389,7 +389,20 @@ void testZmqReceiverMalformedFrameAccounting() {
     TestZmqPublisher publisher;
     ZmqIqReceiver receiver(publisher.endpoint());
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    bool subscriberReady = false;
+    for (int attempt = 0; attempt < 30; ++attempt) {
+        publisher.sendFrame(makeValidZmqFrame());
+        ZmqPacket syncPacket;
+        bool timedOut = false;
+        if (receiver.receive(syncPacket, timedOut)) {
+            subscriberReady = true;
+            break;
+        }
+    }
+    if (!subscriberReady) {
+        throw std::runtime_error(
+            "Failed to observe valid frame while waiting for subscriber");
+    }
 
     auto malformed = makeValidZmqFrame();
     malformed[0] ^= 0x01U;

@@ -54,6 +54,8 @@ airspyhf_zeromq_rx -f 148.525 -a 768000 -Z -I 127.0.0.1 -P 5555
 ./build/airspyhf_decimator --zmq-endpoint tcp://127.0.0.1:5555 --input-rate 768000
 ```
 
+Where `-f` sets frequency in MHz, `-a` sets sample rate in Hz, `-Z` enables ZeroMQ output, and `-I`/`-P` set the publisher bind host/port.
+
 Auto-learn rate from stream and run strict mismatch enforcement:
 
 ```
