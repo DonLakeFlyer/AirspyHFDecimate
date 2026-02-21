@@ -4,6 +4,8 @@
 #include <unistd.h>
 #include <zmq.h>
 
+#include <tagtracker_wireformat/zmq_iq_packet.h>
+
 #include <chrono>
 #include <cmath>
 #include <complex>
@@ -25,12 +27,12 @@
 namespace {
 
 constexpr double kTotalDecimation = 8.0 * 5.0 * 5.0;
-constexpr std::size_t kBytesPerIQ = 8; // 2 * float32
+constexpr std::size_t kBytesPerIQ = TTWF_ZMQ_IQ_BYTES_PER_COMPLEX_SAMPLE;
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kTwoPi = 6.28318530717958647692;
-constexpr uint32_t kZmqMagic = 0x5a514941U;
-constexpr uint16_t kZmqVersion = 1U;
-constexpr uint16_t kZmqHeaderSizeBytes = 40U;
+constexpr uint32_t kZmqMagic = TTWF_ZMQ_IQ_MAGIC;
+constexpr uint16_t kZmqVersion = TTWF_ZMQ_IQ_VERSION;
+constexpr uint16_t kZmqHeaderSizeBytes = TTWF_ZMQ_IQ_HEADER_SIZE;
 
 struct Options {
     double inputRate = 0.0;
@@ -152,43 +154,6 @@ Options parseArgs(int argc, char **argv) {
         throw ArgsError("rate-tol-ppm must be positive");
     }
     return opts;
-}
-
-inline bool isHostLittleEndian() {
-    const uint16_t marker = 0x0001U;
-    return *reinterpret_cast<const uint8_t *>(&marker) == 0x01U;
-}
-
-inline uint16_t bswap16(uint16_t value) {
-    return static_cast<uint16_t>((value >> 8) | (value << 8));
-}
-
-inline uint32_t bswap32(uint32_t value) {
-    return ((value & 0x000000FFU) << 24) | ((value & 0x0000FF00U) << 8) |
-           ((value & 0x00FF0000U) >> 8) | ((value & 0xFF000000U) >> 24);
-}
-
-inline uint64_t bswap64(uint64_t value) {
-    return ((value & 0x00000000000000FFULL) << 56) |
-           ((value & 0x000000000000FF00ULL) << 40) |
-           ((value & 0x0000000000FF0000ULL) << 24) |
-           ((value & 0x00000000FF000000ULL) << 8) |
-           ((value & 0x000000FF00000000ULL) >> 8) |
-           ((value & 0x0000FF0000000000ULL) >> 24) |
-           ((value & 0x00FF000000000000ULL) >> 40) |
-           ((value & 0xFF00000000000000ULL) >> 56);
-}
-
-inline uint16_t fromLittleEndian16(uint16_t value) {
-    return isHostLittleEndian() ? value : bswap16(value);
-}
-
-inline uint32_t fromLittleEndian32(uint32_t value) {
-    return isHostLittleEndian() ? value : bswap32(value);
-}
-
-inline uint64_t fromLittleEndian64(uint64_t value) {
-    return isHostLittleEndian() ? value : bswap64(value);
 }
 
 std::vector<float> designLowpass(std::size_t taps, float cutoff) {
@@ -465,58 +430,26 @@ struct ZmqPacket {
     std::vector<std::complex<float>> samples;
 };
 
-struct ZmqRawHeader {
-    uint32_t magic;
-    uint16_t version;
-    uint16_t headerSize;
-    uint64_t sequence;
-    uint64_t timestampUs;
-    uint32_t sampleRate;
-    uint32_t sampleCount;
-    uint32_t payloadBytes;
-    uint32_t flags;
-};
-
 bool parseZmqFrame(const std::vector<uint8_t> &frame, ZmqPacket &packet) {
-    if (frame.size() < kZmqHeaderSizeBytes) {
+    ttwf_zmq_iq_packet_header_t header{};
+    const int validateRc =
+        ttwf_validate_zmq_iq_frame(frame.data(), frame.size(), &header);
+    if (validateRc != TTWF_ZMQ_OK) {
         return false;
     }
 
-    ZmqRawHeader raw{};
-    std::memcpy(&raw, frame.data(), sizeof(ZmqRawHeader));
+    const std::size_t headerSize = static_cast<std::size_t>(header.header_size);
+    const std::size_t payloadBytes =
+        static_cast<std::size_t>(header.payload_bytes);
 
-    const uint32_t magic = fromLittleEndian32(raw.magic);
-    const uint16_t version = fromLittleEndian16(raw.version);
-    const uint16_t headerSize = fromLittleEndian16(raw.headerSize);
-    const uint64_t sequence = fromLittleEndian64(raw.sequence);
-    const uint64_t timestampUs = fromLittleEndian64(raw.timestampUs);
-    const uint32_t sampleRate = fromLittleEndian32(raw.sampleRate);
-    const uint32_t sampleCount = fromLittleEndian32(raw.sampleCount);
-    const uint32_t payloadBytes = fromLittleEndian32(raw.payloadBytes);
-    const uint32_t flags = fromLittleEndian32(raw.flags);
-
-    if (magic != kZmqMagic || version != kZmqVersion ||
-        headerSize < kZmqHeaderSizeBytes ||
-        static_cast<std::size_t>(headerSize) > frame.size()) {
-        return false;
-    }
-
-    const std::size_t actualPayloadBytes = frame.size() - headerSize;
-    if (payloadBytes != actualPayloadBytes || sampleCount == 0U ||
-        sampleRate == 0U) {
-        return false;
-    }
-    if (static_cast<std::size_t>(sampleCount) * kBytesPerIQ != payloadBytes) {
-        return false;
-    }
-
-    packet.sequence = sequence;
-    packet.timestampUs = timestampUs;
-    packet.sampleRate = sampleRate;
-    packet.sampleCount = sampleCount;
-    packet.flags = flags;
-    packet.payloadBytes = payloadBytes;
-    packet.samples = convertToComplex(frame.data() + headerSize, payloadBytes);
+    packet.sequence = header.sequence;
+    packet.timestampUs = header.timestamp_us;
+    packet.sampleRate = header.sample_rate;
+    packet.sampleCount = header.sample_count;
+    packet.flags = header.flags;
+    packet.payloadBytes = header.payload_bytes;
+    packet.samples =
+        convertToComplex(frame.data() + headerSize, payloadBytes);
     return true;
 }
 

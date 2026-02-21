@@ -15,6 +15,7 @@ Protocol, packet-format, timing, and sample-rate assumption changes must be coor
 ## Build
 
 ```
+git submodule update --init --recursive
 cmake -S . -B build
 cmake --build build
 ```
@@ -22,6 +23,7 @@ cmake --build build
 ## Test
 
 ```
+git submodule update --init --recursive
 cmake -S . -B build
 cmake --build build
 ctest --test-dir build --output-on-failure

@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cmath>
 #include <complex>
 #include <cstdint>
@@ -55,29 +56,6 @@ double estimateToneFrequencyHz(const std::vector<std::complex<float>> &samples,
     return (avgPhaseStep * sampleRateHz) / kTwoPi;
 }
 
-void appendLe16(std::vector<uint8_t> &bytes, uint16_t value) {
-    bytes.push_back(static_cast<uint8_t>(value & 0xFFU));
-    bytes.push_back(static_cast<uint8_t>((value >> 8) & 0xFFU));
-}
-
-void appendLe32(std::vector<uint8_t> &bytes, uint32_t value) {
-    bytes.push_back(static_cast<uint8_t>(value & 0xFFU));
-    bytes.push_back(static_cast<uint8_t>((value >> 8) & 0xFFU));
-    bytes.push_back(static_cast<uint8_t>((value >> 16) & 0xFFU));
-    bytes.push_back(static_cast<uint8_t>((value >> 24) & 0xFFU));
-}
-
-void appendLe64(std::vector<uint8_t> &bytes, uint64_t value) {
-    bytes.push_back(static_cast<uint8_t>(value & 0xFFULL));
-    bytes.push_back(static_cast<uint8_t>((value >> 8) & 0xFFULL));
-    bytes.push_back(static_cast<uint8_t>((value >> 16) & 0xFFULL));
-    bytes.push_back(static_cast<uint8_t>((value >> 24) & 0xFFULL));
-    bytes.push_back(static_cast<uint8_t>((value >> 32) & 0xFFULL));
-    bytes.push_back(static_cast<uint8_t>((value >> 40) & 0xFFULL));
-    bytes.push_back(static_cast<uint8_t>((value >> 48) & 0xFFULL));
-    bytes.push_back(static_cast<uint8_t>((value >> 56) & 0xFFULL));
-}
-
 std::vector<uint8_t> makeIqPayload(
     const std::vector<std::complex<float>> &samples) {
     std::vector<uint8_t> payload;
@@ -99,20 +77,27 @@ std::vector<uint8_t> makeZmqFrame(
     uint64_t timestampUs, uint32_t sampleRate, uint32_t sampleCount,
     uint32_t payloadBytesField, uint32_t flags,
     const std::vector<uint8_t> &payload) {
-    std::vector<uint8_t> frame;
-    frame.reserve(static_cast<std::size_t>(headerSize) + payload.size());
-    appendLe32(frame, magic);
-    appendLe16(frame, version);
-    appendLe16(frame, headerSize);
-    appendLe64(frame, sequence);
-    appendLe64(frame, timestampUs);
-    appendLe32(frame, sampleRate);
-    appendLe32(frame, sampleCount);
-    appendLe32(frame, payloadBytesField);
-    appendLe32(frame, flags);
-    if (headerSize > kZmqHeaderSizeBytes) {
-        frame.resize(headerSize, 0U);
+    const std::size_t encodedHeaderSize =
+        std::max<std::size_t>(static_cast<std::size_t>(headerSize),
+                              TTWF_ZMQ_IQ_HEADER_SIZE);
+    std::vector<uint8_t> frame(encodedHeaderSize, 0U);
+
+    ttwf_zmq_iq_packet_header_t header{};
+    header.magic = magic;
+    header.version = version;
+    header.header_size = headerSize;
+    header.sequence = sequence;
+    header.timestamp_us = timestampUs;
+    header.sample_rate = sampleRate;
+    header.sample_count = sampleCount;
+    header.payload_bytes = payloadBytesField;
+    header.flags = flags;
+
+    if (ttwf_encode_zmq_iq_header(frame.data(), encodedHeaderSize, &header) !=
+        TTWF_ZMQ_OK) {
+        throw std::runtime_error("Failed encoding ZMQ frame header for test");
     }
+
     frame.insert(frame.end(), payload.begin(), payload.end());
     return frame;
 }
