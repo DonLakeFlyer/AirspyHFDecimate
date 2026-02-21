@@ -389,8 +389,10 @@ void testZmqReceiverMalformedFrameAccounting() {
     TestZmqPublisher publisher;
     ZmqIqReceiver receiver(publisher.endpoint());
 
+    constexpr int kMaxSubscriberReadyAttempts = 30;
+    constexpr auto kSubscriberReadyRetryDelay = std::chrono::milliseconds(10);
     bool subscriberReady = false;
-    for (int attempt = 0; attempt < 30; ++attempt) {
+    for (int attempt = 0; attempt < kMaxSubscriberReadyAttempts; ++attempt) {
         publisher.sendFrame(makeValidZmqFrame());
         ZmqPacket syncPacket;
         bool timedOut = false;
@@ -398,6 +400,7 @@ void testZmqReceiverMalformedFrameAccounting() {
             subscriberReady = true;
             break;
         }
+        std::this_thread::sleep_for(kSubscriberReadyRetryDelay);
     }
     if (!subscriberReady) {
         throw std::runtime_error(
