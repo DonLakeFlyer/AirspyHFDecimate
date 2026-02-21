@@ -1,0 +1,3 @@
+[submodule "TagTrackerWireFormat"]
+	path = TagTrackerWireFormat
+	url = https://github.com/DonLakeFlyer/TagTrackerWireFormat.git

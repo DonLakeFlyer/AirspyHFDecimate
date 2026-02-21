@@ -17,6 +17,10 @@ add_executable(airspyhf_decimator
     src/main.cpp
 )
 
+target_include_directories(airspyhf_decimator PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/TagTrackerWireFormat/include
+)
+
 target_link_libraries(airspyhf_decimator PRIVATE PkgConfig::ZeroMQ)
 
 target_compile_options(airspyhf_decimator PRIVATE
@@ -29,6 +33,10 @@ target_compile_options(airspyhf_decimator PRIVATE
 if(BUILD_TESTING)
     add_executable(airspyhf_decimator_tests
         tests/test_main.cpp
+    )
+
+    target_include_directories(airspyhf_decimator_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/TagTrackerWireFormat/include
     )
 
     target_link_libraries(airspyhf_decimator_tests PRIVATE PkgConfig::ZeroMQ)
